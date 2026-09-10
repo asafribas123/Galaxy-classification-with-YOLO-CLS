@@ -1,151 +1,271 @@
-# 🌌 Galaxy Morphology Classification with YOLO-CLS
+# Galaxy Morphology Classification with YOLOv8-CLS
 
-This repository contains all scripts and data pipelines used in the work:  
-**“Deep Learning-Based Morphological Analysis of Galaxies from SDSS and DECaLS Using YOLO-CLS”**  
-by *Asaf Ribas* (FURG, 2025).
+Reproducible pipeline for automated galaxy morphology classification using the public **Galaxy10 DECaLS** dataset and **YOLOv8n-CLS**.
 
-It provides the complete implementation for **downloading**, **preprocessing**, and **classifying galaxies** using the **YOLOv8-CLS** deep learning architecture, applied to real astronomical survey data.
+This repository accompanies the work:
 
----
+**Deep Learning-Based Morphological Analysis of Galaxies from SDSS and DECaLS Using YOLO-CLS**
+Asaf Ribas — Universidade Federal do Rio Grande (FURG)
 
-## 🪐 Overview
+## Overview
 
-Galaxy morphology is a cornerstone of extragalactic astronomy, providing insight into galaxy formation, evolution, and environmental interactions.  
-However, visual classification of millions of galaxies is no longer feasible due to data scale and human bias.
+The pipeline performs the complete experimental workflow required to reproduce the classification analysis:
 
-This repository presents a **deep learning framework for automated morphological classification**, bridging **computer vision** and **astrophysics**.  
-Our model — **YOLOv8-CLS** — was trained on a curated, cross-matched dataset combining **SDSS DR8**, **DECaLS**, **Galaxy Zoo**, and **redMaPPer** catalogs.
+1. downloads and verifies the Galaxy10 DECaLS dataset;
+2. reads the HDF5 images, labels, and available metadata;
+3. aggregates the 10 original Galaxy10 classes into three morphological macroclasses;
+4. balances the macroclasses by random undersampling without replacement;
+5. creates stratified train/validation/test splits;
+6. trains YOLOv8n-CLS using multiple epoch budgets and random seeds;
+7. selects the final configuration using validation performance only;
+8. evaluates the selected model on the held-out test set;
+9. performs resolution and augmentation ablations;
+10. evaluates performance as a function of redshift;
+11. compares YOLOv8n-CLS with reference architectures;
+12. saves manifests, predictions, metrics, figures, checkpoints, and a complete execution report.
 
----
-├── downloads_dataset.ipynb # Dataset download and preprocessing
-├── Yolo_dados.ipynb # YOLO-CLS training and evaluation
-├── dataset_cls/ # Structured dataset (train / val)
-├── results/ # Plots, confusion matrices, learning curves
-└── README.md # Project documentation
+The test set is not used for hyperparameter selection or for defining redshift boundaries.
 
----
+## Dataset
 
-## 📦 Dataset
+The pipeline uses the public **Galaxy10 DECaLS** dataset:
 
-- **Sources:** SDSS DR8, DECaLS, Galaxy Zoo, redMaPPer cluster catalog  
-- **Coverage:** ~19,865 deg² (northern + equatorial hemispheres)  
-- **Sample size:** ≈18,000 galaxies  
-- **Classes:** *smooth*, *spiral*, *irregular*  
-- **Preprocessing:**  
-  - Image resizing: 128 × 128 px  
-  - Normalization: [0, 1]  
-  - Augmentations: rotation, flip, brightness  
+* File: `Galaxy10_DECals_NoDuplicated.h5`
+* DOI: `10.5281/zenodo.10845026`
+* Expected MD5: `a920094d5e470e3705f4691c0d6dff54`
+* Image channels: `g`, `r`, and `z`
+* Class labels: HDF5 field `ans`
+* Additional metadata, when available: right ascension, declination, redshift, and pixel scale
 
-Each image is formatted for **YOLO-CLS** ingestion in the standard **Ultralytics** structure.
+The dataset is downloaded automatically by the notebook when it is not available locally. File integrity is checked before the analysis continues.
 
----
+No additional catalog cross-match or external quality filtering is applied by this pipeline.
 
-## ⚙️ Installation
+## Morphological Taxonomy
 
-Clone the repository and install dependencies:
+The 10 original Galaxy10 DECaLS classes are aggregated into three macroclasses:
+
+| Original ID | Original class                   | Macroclass          |
+| ----------: | -------------------------------- | ------------------- |
+|           0 | Disturbed Galaxies               | `disturbed_merging` |
+|           1 | Merging Galaxies                 | `disturbed_merging` |
+|           2 | Round Smooth Galaxies            | `smooth`            |
+|           3 | In-between Round Smooth Galaxies | `smooth`            |
+|           4 | Cigar Shaped Smooth Galaxies     | `smooth`            |
+|           5 | Barred Spiral Galaxies           | `disk_spiral`       |
+|           6 | Unbarred Tight Spiral Galaxies   | `disk_spiral`       |
+|           7 | Unbarred Loose Spiral Galaxies   | `disk_spiral`       |
+|           8 | Edge-on Galaxies without Bulge   | `disk_spiral`       |
+|           9 | Edge-on Galaxies with Bulge      | `disk_spiral`       |
+
+The `disk_spiral` macroclass includes edge-on systems and therefore does not assume direct visual identification of spiral arms in those objects.
+
+## Experimental Design
+
+### Sampling and splits
+
+* Class balancing: random undersampling without replacement
+* Target size: size of the least populated macroclass
+* Balancing seed: `42`
+* Stratified split:
+
+  * training: `70%`
+  * validation: `15%`
+  * test: `15%`
+* Split seed: `42`
+
+The balanced sample is an experimental dataset and must not be interpreted as representing the cosmological abundance of the three morphological classes.
+
+### YOLOv8n-CLS configuration
+
+| Parameter               | Value               |
+| ----------------------- | ------------------- |
+| Initial weights         | `yolov8n-cls.pt`    |
+| Main image size         | `128 × 128` px      |
+| Resolution ablation     | `128`, `256` px     |
+| Epoch budgets           | `30`, `50`, `100`   |
+| Random seeds            | `42`, `123`, `2026` |
+| Batch size              | `16`                |
+| Optimizer               | `AdamW`             |
+| Initial learning rate   | `1e-3`              |
+| Weight decay            | `5e-4`              |
+| LR schedule             | cosine              |
+| Early-stopping patience | `15` epochs         |
+| Workers                 | `4`                 |
+| Pretrained weights      | enabled             |
+| Deterministic mode      | enabled             |
+
+The final YOLO configuration is selected from the validation results using macro F1-score, balanced accuracy, and training time as ranking criteria.
+
+### Data augmentation
+
+The default physically motivated augmentation configuration is:
+
+* rotation: up to `180°`;
+* horizontal flip probability: `0.5`;
+* vertical flip probability: `0.5`;
+* translation: `0.05`;
+* scale variation: `0.10`;
+* saturation variation: `0.10`;
+* brightness/value variation: `0.20`;
+* hue variation: disabled;
+* automatic augmentation policies: disabled;
+* random erasing: disabled.
+
+A no-augmentation configuration is also evaluated as an ablation experiment.
+
+### Reference models
+
+The same train/validation/test partitions are used to evaluate:
+
+* ResNet18;
+* EfficientNet-B0;
+* ViT-Tiny (`vit_tiny_patch16_224`).
+
+These models use ImageNet-pretrained weights and an output layer adapted to the three macroclasses.
+
+## Repository Structure
+
+```text
+.
+├── Galaxy10_YOLOv8_pipeline_reprodutivel.ipynb
+├── requirements.txt
+└── README.md
+```
+
+During execution, the notebook creates:
+
+```text
+galaxy10_revision/
+├── data/
+├── dataset_balanced_3classes/
+├── manifests/
+├── results/
+├── figures/
+├── yolo_runs/
+├── redshift_datasets/
+└── baseline_runs/
+```
+
+## Installation
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/asafribas123/Galaxy-classification-with-YOLO-CLS.git
 cd Galaxy-classification-with-YOLO-CLS
+```
+
+A dedicated Python environment is recommended:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
-## 📂 Repository Structure
-├── downloads_dataset.ipynb # Dataset download and preprocessing
-├── Yolo_dados.ipynb # YOLO-CLS training and evaluation
-├── dataset_cls/ # Structured dataset (train / val)
-├── results/ # Plots, confusion matrices, learning curves
-└── README.md # Project documentation
 
----
-
-## 📦 Dataset
-
-- **Sources:** SDSS DR8, DECaLS, Galaxy Zoo, redMaPPer cluster catalog  
-- **Coverage:** ~19,865 deg² (northern + equatorial hemispheres)  
-- **Sample size:** ≈18,000 galaxies  
-- **Classes:** *smooth*, *spiral*, *irregular*  
-- **Preprocessing:**  
-  - Image resizing: 128 × 128 px  
-  - Normalization: [0, 1]  
-  - Augmentations: rotation, flip, brightness  
-
-Each image is formatted for **YOLO-CLS** ingestion in the standard **Ultralytics** structure.
-
----
-
-## ⚙️ Installation
-
-Clone the repository and install dependencies:
+If a pinned `requirements.txt` is not available, the dependencies used by the notebook are:
 
 ```bash
-git clone https://github.com/asafribas123/Galaxy-classification-with-YOLO-CLS.git
-cd Galaxy-classification-with-YOLO-CLS
-pip install -r requirements.txt
+pip install ultralytics h5py requests tqdm scikit-learn pandas matplotlib pillow joblib torch torchvision timm
 ```
-Or install manually:
+
+For local notebook execution, install Jupyter if necessary:
+
 ```bash
-pip install ultralytics numpy pandas matplotlib seaborn tqdm h5py
+pip install jupyterlab
 ```
-🚀 Usage
+
+## Reproduction
+
+Open the notebook:
+
 ```bash
-python downloads_dataset.ipynb
+jupyter lab Galaxy10_YOLOv8_pipeline_reprodutivel.ipynb
 ```
-Train and evaluate the YOLO-CLS model:
-```bash
-python Yolo_dados.ipynb
+
+Then execute the cells sequentially from top to bottom.
+
+The complete workflow can be controlled through the `Config` dataclass near the beginning of the notebook. Computationally expensive analyses can be enabled or disabled using:
+
+```python
+run_epoch_sweep
+run_resolution_ablation
+run_augmentation_ablation
+run_redshift_specialists
+run_baselines
 ```
-All intermediate data and model outputs are automatically saved under the dataset_cls/ and results/ directories.
 
-📊 Results
-Metric	Value
-Top-1 Accuracy	0.90
-Top-5 Accuracy	1.00
-Macro F1-Score	0.91
+For a minimal execution test, set:
 
-Per-class performance:
+```python
+quick_test = True
+```
 
-Smooth → F1 = 0.87
+This reduces the experiment to one epoch and one random seed and is intended only to verify that the pipeline executes successfully.
 
-Spiral → F1 = 0.91
+## Reproducibility and Data Leakage Control
 
-Irregular → F1 = 0.94
+The pipeline implements the following controls:
 
-(See confusion matrix and learning curves under /results.)
+* fixed seeds for Python, NumPy, PyTorch, sampling, splitting, and bootstrap procedures;
+* deterministic PyTorch execution when supported;
+* dataset integrity verification using MD5;
+* explicit storage of the balanced sample and split manifests;
+* stratified train/validation/test partitions;
+* validation-only model selection;
+* redshift boundaries estimated from the training data only;
+* held-out test evaluation after model selection;
+* explicit augmentation parameters;
+* software and hardware information recorded during execution;
+* automatic saving of the final experimental configuration and metrics.
 
-🧠 Methodology Summary
+The main execution record is written to:
 
-Architecture: YOLOv8-CLS (classification head adaptation)
+```text
+galaxy10_revision/results/complete_run_report.json
+```
 
-Training: 30 epochs | batch size 16 | image size 128 × 128
+This file contains the dataset checksum, sample sizes, class counts, split sizes, taxonomy, redshift boundaries, selected YOLO configuration, test metrics, software versions, platform information, and experimental parameters.
 
-Optimizer: SGD (momentum = 0.937) + cosine LR schedule
+## Main Outputs
 
-Hardware: AMD Ryzen 5 4600G (CPU-based training)
+Relevant outputs are stored under `galaxy10_revision/`, including:
 
-The model achieved high stability, generalization, and interpretability, comparable to or exceeding CNNs such as ResNet-50 and EfficientNet.
+* balanced dataset manifests;
+* train/validation/test membership;
+* validation and test predictions;
+* classification metrics;
+* confusion matrices;
+* bootstrap estimates;
+* redshift-dependent analyses;
+* resolution and augmentation ablations;
+* baseline-model comparisons;
+* YOLO checkpoints;
+* figures;
+* `complete_run_report.json`.
 
-🔗 Reference Files
+Because model metrics may vary across software versions, hardware, and numerical backends, numerical results are not hard-coded in this README. The values generated by a specific execution should be taken from the saved result files and execution report.
 
-File: downloads_dataset.ipynb
+## Citation
 
-Repository: github.com/asafribas123/Galaxy-classification-with-YOLO-CLS
+If you use this repository, please cite the associated work and the Galaxy10 DECaLS dataset.
 
-🧾 Citation
-
-If you use this repository, please cite:
-```bash
-@article{ribas2025yolocls,
-  title   = {Deep Learning-Based Morphological Analysis of Galaxies from SDSS and DECaLS Using YOLO-CLS},
-  author  = {Ribas, Asaf},
-  journal = {IEEE Journal of Computational Modeling},
-  year    = {2025}
+```bibtex
+@software{ribas_galaxy_yolocls,
+  author = {Ribas, Asaf},
+  title  = {Galaxy Morphology Classification with YOLOv8-CLS},
+  url    = {https://github.com/asafribas123/Galaxy-classification-with-YOLO-CLS}
 }
 ```
-👤 Author
 
-Asaf Ribas
-Physicist & M.Sc. Student in Computational Modeling – FURG
-Research in galaxy morphology, machine learning, and spectroscopy
-📧 asaf.ribas@furg.br
-📧 asafibas@hotmail.com
+Dataset:
 
+**Galaxy10 DECaLS** — DOI: `10.5281/zenodo.10845026`
+
+## Author
+
+**Asaf Ribas**
+Universidade Federal do Rio Grande — FURG
+Research interests: galaxy morphology, machine learning, and astronomical spectroscopy.
